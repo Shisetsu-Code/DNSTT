@@ -1,0 +1,58 @@
+name: Prueba movil sin datos (HTTPS)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Iniciar diagnostico temporal
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 experiments/mobile-connectivity/probe.py > "$RUNNER_TEMP/probe.log" 2>&1 &
+          for i in $(seq 1 15); do
+            if curl -fsS --max-time 2 http://127.0.0.1:8080/health > /dev/null; then break; fi
+            sleep 1
+          done
+          curl -fsS http://127.0.0.1:8080/health
+          curl -fLsS --retry 3 https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 -o "$RUNNER_TEMP/cloudflared"
+          chmod +x "$RUNNER_TEMP/cloudflared"
+          "$RUNNER_TEMP/cloudflared" tunnel --url http://127.0.0.1:8080 --output json > "$RUNNER_TEMP/tunnel.log" 2>&1 &
+          URL=""
+          for i in $(seq 1 60); do
+            URL=$(grep -Eo 'https://[a-z0-9-]+\.trycloudflare\.com' "$RUNNER_TEMP/tunnel.log" | head -1 || true)
+            if [ -n "$URL" ]; then break; fi
+            sleep 2
+          done
+          if [ -z "$URL" ]; then
+            tail -n 50 "$RUNNER_TEMP/tunnel.log"
+            exit 1
+          fi
+          REACHABLE=no
+          for i in $(seq 1 15); do
+            if [ "$(curl --max-time 8 -s -o /dev/null -w '%{http_code}' "$URL/health" || true)" = 200 ]; then REACHABLE=yes; break; fi
+            sleep 2
+          done
+          if [ "$REACHABLE" != yes ]; then tail -n 30 "$RUNNER_TEMP/tunnel.log"; exit 1; fi
+          echo "LINK DE PRUEBA: $URL"
+          {
+            echo "## Enlace de prueba movil"
+            echo ""
+            echo "**Abrir desde telefono:** $URL"
+            echo ""
+            echo "1. Probar primero con Wi-Fi."
+            echo "2. Apagar Wi-Fi; activar datos moviles de la SIM sin paquete."
+            echo "3. Pulsar Probar conexion ahora y verificar el desafio aleatorio."
+            echo ""
+            echo "**Esto prueba HTTPS; NO BHTTP, una VPN ni exencion de cobro.**"
+            echo ""
+            echo "El enlace caduca al terminar este trabajo (10 minutos)."
+          } >> "$GITHUB_STEP_SUMMARY"
+          sleep 600
