@@ -1,0 +1,58 @@
+name: DNSTT loopback smoke test
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  loopback:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Checkout lab
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.x'
+
+      - name: Clone and build upstream DNSTT
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --depth 1 https://www.bamsoftware.com/git/dnstt.git upstream
+          (cd upstream/dnstt-server && go build -o "$GITHUB_WORKSPACE/dnstt-server" .)
+          (cd upstream/dnstt-client && go build -o "$GITHUB_WORKSPACE/dnstt-client" .)
+          ./dnstt-server -h || true
+          ./dnstt-client -h || true
+
+      - name: Loopback end-to-end tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/dnstt-test
+          echo "DNSTT_LOOPBACK_OK" > /tmp/dnstt-test/index.html
+          python3 -m http.server 18080 --bind 127.0.0.1 --directory /tmp/dnstt-test > /tmp/http.log 2>&1 &
+          HTTP_PID=$!
+          ./dnstt-server -gen-key -privkey-file /tmp/server.key -pubkey-file /tmp/server.pub
+          ./dnstt-server -udp 127.0.0.1:15353 -privkey-file /tmp/server.key t.test. 127.0.0.1:18080 > /tmp/server.log 2>&1 &
+          SERVER_PID=$!
+          ./dnstt-client -udp 127.0.0.1:15353 -pubkey-file /tmp/server.pub t.test. 127.0.0.1:17000 > /tmp/client.log 2>&1 &
+          CLIENT_PID=$!
+          cleanup() {
+            kill "$CLIENT_PID" "$SERVER_PID" "$HTTP_PID" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for i in $(seq 1 30); do
+            if curl --fail --silent --max-time 2 http://127.0.0.1:17000/ | grep -q "DNSTT_LOOPBACK_OK"; then
+              echo "PASS: DNSTT localhost tunnel"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "FAIL: tunnel failed"
+          cat /tmp/server.log /tmp/client.log /tmp/http.log || true
+          exit 1
